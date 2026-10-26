@@ -2,6 +2,8 @@
 
 ## Overview
 
+Rowter is a type-safe HTTP router for PureScript.
+
 ## Docs
 
 - `README.md` — Project overview and usage
