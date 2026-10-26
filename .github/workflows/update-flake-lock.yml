@@ -1,0 +1,21 @@
+name: "Update Flake Lock"
+
+on:
+  workflow_dispatch: # Allow manual trigger
+  schedule:
+    - cron: "0 15 * * 5" # Run every Saturday at 00:00 JST (Friday 15:00 UTC)
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-flake-lock:
+    uses: gawakawa/.github/.github/workflows/update-flake-lock.yml@main
+    with:
+      auto-merge: true
+      pr-title: "⬆️ Update flake.lock"
+      branch: "update-flake-lock"
+    secrets:
+      BOT_APP_ID: ${{ secrets.BOT_APP_ID }}
+      BOT_PRIVATE_KEY: ${{ secrets.BOT_PRIVATE_KEY }}
