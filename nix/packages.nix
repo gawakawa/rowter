@@ -23,16 +23,20 @@
       ps = purs-nix.purs {
         dependencies = [
           "argonaut-core"
+          "arrays"
           "codec"
           "codec-argonaut"
           "console"
           "effect"
           "either"
           "integers"
+          "maybe"
           "numbers"
           "prelude"
+          "record"
           "strings"
           "tuples"
+          "type-equality"
           "variant"
         ];
 

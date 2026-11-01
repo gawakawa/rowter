@@ -3,10 +3,12 @@ module Rowter where
 import Prelude
 
 import Data.Argonaut.Core (stringify)
-import Data.Codec (Codec', codec', encode)
+import Data.Array as Array
+import Data.Codec (Codec', codec', decode, encode)
 import Data.Codec.Argonaut as CA
-import Data.Either (Either(..), note)
+import Data.Either (Either(..), hush, note)
 import Data.Int as Int
+import Data.Maybe (Maybe(..))
 import Data.Number as Number
 import Data.Number.Format as Number.Format
 import Data.Reflectable (class Reflectable, reflectType)
@@ -14,13 +16,17 @@ import Data.String.Regex (Regex)
 import Data.String.Regex as Regex
 import Data.String.Regex.Flags (noFlags)
 import Data.String.Regex.Unsafe (unsafeRegex)
-import Data.Symbol (class IsSymbol)
+import Data.Symbol (class IsSymbol, reflectSymbol)
 import Data.Tuple (Tuple(..))
 import Data.Variant (Variant)
 import Data.Variant as V
 import Prim.Row as Row
 import Prim.RowList (class RowToList, Cons, Nil, RowList)
+import Prim.Symbol (class Append)
+import Prim.Symbol as Symbol
 import Prim.TypeError (class Fail, Text)
+import Record as Record
+import Type.Equality (class TypeEquals, from)
 import Type.Proxy (Proxy(..))
 
 -- Codec
@@ -153,3 +159,104 @@ else instance
 toResponse
   :: forall r rl. RowToList r rl => EncodeResponse rl r => Variant r -> Response
 toResponse = encodeResponse (Proxy :: Proxy rl)
+
+-- Path
+
+data Segments
+
+foreign import data SNil :: Segments
+foreign import data SLit :: Symbol -> Segments -> Segments
+foreign import data SCapture :: Symbol -> Segments -> Segments
+
+-- "/users/:id" is parsed into SLit "users" (SCapture "id" SNil)
+class ParsePath (path :: Symbol) (segs :: Segments) | path -> segs
+
+instance (Symbol.Cons h t path, ParseHead h t segs) => ParsePath path segs
+
+class ParseHead (h :: Symbol) (t :: Symbol) (segs :: Segments) | h t -> segs
+
+instance ParseRest t "" segs => ParseHead "/" t segs
+else instance Fail (Text "A path must start with /") => ParseHead h t SNil
+
+-- acc is the segment being read
+class
+  ParseRest (rest :: Symbol) (acc :: Symbol) (segs :: Segments)
+  | rest acc -> segs
+
+instance Emit acc SNil segs => ParseRest "" acc segs
+else instance
+  ( Symbol.Cons c rest' rest
+  , ParseStep c rest' acc segs
+  ) =>
+  ParseRest rest acc segs
+
+class
+  ParseStep (c :: Symbol) (rest :: Symbol) (acc :: Symbol) (segs :: Segments)
+  | c rest acc -> segs
+
+instance
+  ( ParseRest rest "" next
+  , Emit acc next segs
+  ) =>
+  ParseStep "/" rest acc segs
+else instance
+  ( Append acc c acc'
+  , ParseRest rest acc' segs
+  ) =>
+  ParseStep c rest acc segs
+
+class
+  Emit (acc :: Symbol) (next :: Segments) (out :: Segments)
+  | acc next -> out
+
+instance Emit "" next next
+else instance
+  ( Symbol.Cons h t acc
+  , EmitSegment h t acc next out
+  ) =>
+  Emit acc next out
+
+class
+  EmitSegment
+    (h :: Symbol)
+    (t :: Symbol)
+    (acc :: Symbol)
+    (next :: Segments)
+    (out :: Segments)
+  | h t acc next -> out
+
+instance EmitSegment ":" name acc next (SCapture name next)
+else instance EmitSegment h t acc next (SLit acc next)
+
+class MatchPath (segs :: Segments) (params :: Row Type) where
+  matchPath :: Proxy segs -> Array String -> Maybe (Record params)
+
+-- Only a path without captures may have an empty params
+instance TypeEquals (Record params) (Record ()) => MatchPath SNil params where
+  matchPath _ [] = Just (from {})
+  matchPath _ _ = Nothing
+
+instance
+  ( IsSymbol lit
+  , MatchPath rest params
+  ) =>
+  MatchPath (SLit lit rest) params where
+  matchPath _ segs = case Array.uncons segs of
+    Just { head, tail } | head == reflectSymbol (Proxy :: Proxy lit) ->
+      matchPath (Proxy :: Proxy rest) tail
+    _ -> Nothing
+
+instance
+  ( IsSymbol name
+  , Row.Cons name a params' params
+  , Row.Lacks name params'
+  , HasTextCodec a
+  , MatchPath rest params'
+  ) =>
+  MatchPath (SCapture name rest) params where
+  matchPath _ segs = case Array.uncons segs of
+    Just { head, tail } -> do
+      a <- hush (decode textCodec head)
+      rest <- matchPath (Proxy :: Proxy rest) tail
+      pure (Record.insert (Proxy :: Proxy name) a rest)
+    Nothing -> Nothing

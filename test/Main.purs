@@ -19,13 +19,14 @@ import Data.Variant (Variant)
 import Effect (Effect)
 import Effect.Aff (Aff)
 import Foreign.Object as FO
-import Rowter (class HasJsonCodec, class HasTextCodec, Response, WithStatus, jsonCodec, respond, textCodec, toResponse)
+import Rowter (class HasJsonCodec, class HasTextCodec, class MatchPath, class ParsePath, Response, WithStatus, jsonCodec, matchPath, respond, textCodec, toResponse)
 import Test.QuickCheck (Result, arbitrary, (===))
 import Test.QuickCheck.Gen (Gen, arrayOf, chooseInt, elements)
 import Test.Unit (TestSuite, suite, test)
 import Test.Unit.Assert as Assert
 import Test.Unit.Main (runTest)
 import Test.Unit.QuickCheck (quickCheck)
+import Type.Proxy (Proxy(..))
 
 type User = { name :: String, age :: Int }
 type ErrorBody = { message :: String }
@@ -34,6 +35,14 @@ type NotFoundErr r = (notFound :: WithStatus 404 ErrorBody | r)
 
 taro :: User
 taro = { name: "taro", age: 20 }
+
+matchOf
+  :: forall @path segs params
+   . ParsePath path segs
+  => MatchPath segs params
+  => Array String
+  -> Maybe (Record params)
+matchOf = matchPath (Proxy :: Proxy segs)
 
 -- Json has no Show instance; Eq compares objects regardless of key order
 newtype Structural = Structural Json
@@ -207,6 +216,25 @@ main = runTest do
       test "json Int from a string" do
         Assert.equal true
           (isLeft (decodeJson (fromString "1") :: Either JsonDecodeError Int))
+  suite "path" do
+    test "a capture is decoded by its codec" do
+      quickCheck \(id :: Int) ->
+        ( matchOf @"/users/:id" [ "users", encodeText id ]
+            :: Maybe { id :: Int }
+        ) === Just { id }
+    test "a capture that does not decode" do
+      Assert.equal Nothing
+        (matchOf @"/users/:id" [ "users", "abc" ] :: Maybe { id :: Int })
+    test "a missing segment" do
+      Assert.equal Nothing
+        (matchOf @"/users/:id" [ "users" ] :: Maybe { id :: Int })
+    test "a different literal" do
+      Assert.equal Nothing
+        (matchOf @"/users/:id" [ "posts", "42" ] :: Maybe { id :: Int })
+    test "an extra segment" do
+      Assert.equal Nothing (matchOf @"/users" [ "users", "1" ] :: Maybe {})
+    test "the root" do
+      Assert.equal (Just {}) (matchOf @"/" [] :: Maybe {})
   suite "response" do
     let
       ok = toResponse
