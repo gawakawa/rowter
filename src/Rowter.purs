@@ -2,8 +2,11 @@ module Rowter where
 
 import Prelude
 
+import Control.Alt ((<|>))
 import Data.Argonaut.Core (stringify)
+import Data.Argonaut.Parser (jsonParser)
 import Data.Array as Array
+import Data.Bifunctor (lmap)
 import Data.Codec (Codec', codec', decode, encode)
 import Data.Codec.Argonaut as CA
 import Data.Either (Either(..), hush, note)
@@ -20,6 +23,9 @@ import Data.Symbol (class IsSymbol, reflectSymbol)
 import Data.Tuple (Tuple(..))
 import Data.Variant (Variant)
 import Data.Variant as V
+import Effect.Aff (Aff)
+import Foreign.Object (Object)
+import Foreign.Object as FO
 import Prim.Row as Row
 import Prim.RowList (class RowToList, Cons, Nil, RowList)
 import Prim.Symbol (class Append)
@@ -260,3 +266,158 @@ instance
       rest <- matchPath (Proxy :: Proxy rest) tail
       pure (Record.insert (Proxy :: Proxy name) a rest)
     Nothing -> Nothing
+
+-- Spec
+
+data Endpoint
+  (method :: Symbol)
+  (path :: Symbol)
+  (req :: Type)
+  (res :: Row Type)
+
+type GET = Endpoint "GET"
+type POST = Endpoint "POST"
+type PUT = Endpoint "PUT"
+type PATCH = Endpoint "PATCH"
+type DELETE = Endpoint "DELETE"
+
+-- Router
+
+type Request =
+  { method :: String
+  , path :: Array String
+  , query :: Object String
+  , body :: String
+  }
+
+-- The row of the "params" field of a request record
+class ParamsOf (rl :: RowList Type) (params :: Row Type) | rl -> params
+
+instance ParamsOf Nil ()
+instance ParamsOf (Cons "params" (Record params) tl) params
+else instance ParamsOf tl params => ParamsOf (Cons l a tl) params
+
+class ParseQuery (rl :: RowList Type) (q :: Row Type) | rl -> q where
+  parseQuery :: Proxy rl -> Object String -> Either String (Record q)
+
+instance ParseQuery Nil () where
+  parseQuery _ _ = Right {}
+
+instance
+  ( IsSymbol l
+  , HasTextCodec a
+  , ParseQuery tl q'
+  , Row.Cons l a q' q
+  , Row.Lacks l q'
+  ) =>
+  ParseQuery (Cons l a tl) q where
+  parseQuery _ obj = do
+    let key = reflectSymbol (Proxy :: Proxy l)
+    raw <- note ("Missing query parameter: " <> key) (FO.lookup key obj)
+    a <- lmap (\e -> "Invalid query parameter " <> key <> ": " <> e)
+      (decode textCodec raw)
+    rest <- parseQuery (Proxy :: Proxy tl) obj
+    pure (Record.insert (Proxy :: Proxy l) a rest)
+
+-- How one field of the request record is built; params is the already matched path
+class ReqField (params :: Row Type) (l :: Symbol) (a :: Type) where
+  reqField :: Proxy l -> Record params -> Request -> Either String a
+
+instance ReqField params "params" (Record params) where
+  reqField _ params _ = Right params
+else instance
+  ( RowToList q ql
+  , ParseQuery ql q
+  ) =>
+  ReqField params "query" (Record q) where
+  reqField _ _ request = parseQuery (Proxy :: Proxy ql) request.query
+else instance HasJsonCodec a => ReqField params "body" a where
+  reqField _ _ request = do
+    json <- lmap (\e -> "Invalid JSON: " <> e) (jsonParser request.body)
+    lmap (\e -> "Invalid body: " <> CA.printJsonDecodeError e)
+      (decode jsonCodec json)
+else instance
+  Fail (Text "A request type may only have the fields params, query and body") =>
+  ReqField params l a where
+  reqField _ _ _ = Left ""
+
+-- Builds the record a handler receives
+class
+  BuildReq (params :: Row Type) (rl :: RowList Type) (req :: Row Type)
+  | rl -> req where
+  buildReq :: Proxy rl -> Record params -> Request -> Either String (Record req)
+
+instance BuildReq params Nil () where
+  buildReq _ _ _ = Right {}
+
+instance
+  ( IsSymbol l
+  , ReqField params l a
+  , BuildReq params tl req'
+  , Row.Cons l a req' req
+  , Row.Lacks l req'
+  ) =>
+  BuildReq params (Cons l a tl) req where
+  buildReq _ params request = do
+    a <- reqField (Proxy :: Proxy l) params request
+    rest <- buildReq (Proxy :: Proxy tl) params request
+    pure (Record.insert (Proxy :: Proxy l) a rest)
+
+class Route endpoint handler | endpoint -> handler where
+  route :: Proxy endpoint -> handler -> Request -> Maybe (Aff Response)
+
+instance
+  ( IsSymbol method
+  , ParsePath path segs
+  , RowToList req rl
+  , ParamsOf rl params
+  , MatchPath segs params
+  , BuildReq params rl req
+  , RowToList res resRl
+  , EncodeResponse resRl res
+  ) =>
+  Route (Endpoint method path (Record req) res)
+    (Record req -> Aff (Variant res)) where
+  route _ handler request
+    | request.method == reflectSymbol (Proxy :: Proxy method) =
+        matchPath (Proxy :: Proxy segs) request.path <#>
+          \(params :: Record params) ->
+            case buildReq (Proxy :: Proxy rl) params request of
+              Left message -> pure (badRequest message)
+              Right req -> toResponse <$> handler req
+    | otherwise = Nothing
+
+class Routes (rl :: RowList Type) (handlers :: Row Type) where
+  routes :: Proxy rl -> Record handlers -> Request -> Maybe (Aff Response)
+
+instance Routes Nil handlers where
+  routes _ _ _ = Nothing
+
+instance
+  ( IsSymbol l
+  , Row.Cons l handler handlers' handlers
+  , Route endpoint handler
+  , Routes tl handlers
+  ) =>
+  Routes (Cons l endpoint tl) handlers where
+  routes _ handlers request =
+    route (Proxy :: Proxy endpoint) (Record.get (Proxy :: Proxy l) handlers)
+      request
+      <|> routes (Proxy :: Proxy tl) handlers request
+
+router
+  :: forall @spec rl handlers
+   . RowToList spec rl
+  => Routes rl handlers
+  => Record handlers
+  -> Request
+  -> Aff Response
+router handlers request = case routes (Proxy :: Proxy rl) handlers request of
+  Just response -> response
+  Nothing -> pure notFound
+
+notFound :: Response
+notFound = { status: 404, headers: [], body: "Not Found" }
+
+badRequest :: String -> Response
+badRequest message = { status: 400, headers: [], body: message }

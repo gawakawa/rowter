@@ -5,6 +5,7 @@ import Prelude
 import Data.Argonaut.Core (Json, caseJson, fromArray, fromObject, fromString, stringify)
 import Data.Argonaut.Parser (jsonParser)
 import Data.Array (replicate)
+import Data.Array as Array
 import Data.Array.NonEmpty (cons')
 import Data.Codec (decode, encode)
 import Data.Codec.Argonaut (JsonDecodeError)
@@ -19,7 +20,7 @@ import Data.Variant (Variant)
 import Effect (Effect)
 import Effect.Aff (Aff)
 import Foreign.Object as FO
-import Rowter (class HasJsonCodec, class HasTextCodec, class MatchPath, class ParsePath, Response, WithStatus, jsonCodec, matchPath, respond, textCodec, toResponse)
+import Rowter (class HasJsonCodec, class HasTextCodec, class MatchPath, class ParsePath, GET, POST, Request, Response, WithStatus, jsonCodec, matchPath, respond, router, textCodec, toResponse)
 import Test.QuickCheck (Result, arbitrary, (===))
 import Test.QuickCheck.Gen (Gen, arrayOf, chooseInt, elements)
 import Test.Unit (TestSuite, suite, test)
@@ -33,8 +34,41 @@ type ErrorBody = { message :: String }
 
 type NotFoundErr r = (notFound :: WithStatus 404 ErrorBody | r)
 
+type Api =
+  ( getUser ::
+      GET "/users/:id" { params :: { id :: Int } }
+        (ok :: WithStatus 200 User | NotFoundErr ())
+  , listUsers ::
+      GET "/users" { query :: { limit :: Int } }
+        (ok :: WithStatus 200 (Array User))
+  , createUser ::
+      POST "/users" { body :: User }
+        (created :: WithStatus 201 User)
+  )
+
 taro :: User
 taro = { name: "taro", age: 20 }
+
+hanako :: User
+hanako = { name: "hanako", age: 30 }
+
+users :: Array User
+users = [ taro, hanako ]
+
+app :: Request -> Aff Response
+app = router @Api
+  { getUser: \{ params: { id } } -> pure case id of
+      1 -> respond @"ok" taro
+      _ -> respond @"notFound" { message: "no user" }
+  , listUsers: \{ query: { limit } } -> pure
+      (respond @"ok" (Array.take limit users))
+  , createUser: \{ body } -> pure (respond @"created" body)
+  }
+
+request
+  :: String -> Array String -> Array (Tuple String String) -> String -> Request
+request method path query body =
+  { method, path, query: FO.fromFoldable query, body }
 
 matchOf
   :: forall @path segs params
@@ -253,3 +287,44 @@ main = runTest do
       assertJsonBody """{"message":"no user"}""" notFound
     test "content type" do
       Assert.equal [ Tuple "Content-Type" "application/json" ] ok.headers
+  suite "router" do
+    test "GET /users/1" do
+      response <- app (request "GET" [ "users", "1" ] [] "")
+      Assert.equal 200 response.status
+      Assert.equal [ Tuple "Content-Type" "application/json" ] response.headers
+      assertJsonBody """{"name":"taro","age":20}""" response
+    test "GET /users/2 is handled as an error response" do
+      response <- app (request "GET" [ "users", "2" ] [] "")
+      Assert.equal 404 response.status
+      assertJsonBody """{"message":"no user"}""" response
+    test "GET /users/abc does not match the route" do
+      response <- app (request "GET" [ "users", "abc" ] [] "")
+      Assert.equal 404 response.status
+      Assert.equal "Not Found" response.body
+    test "GET /users?limit=1" do
+      response <- app (request "GET" [ "users" ] [ Tuple "limit" "1" ] "")
+      Assert.equal 200 response.status
+      assertJsonBody """[{"name":"taro","age":20}]""" response
+    test "GET /users without limit" do
+      response <- app (request "GET" [ "users" ] [] "")
+      Assert.equal 400 response.status
+    test "GET /users?limit=x" do
+      response <- app (request "GET" [ "users" ] [ Tuple "limit" "x" ] "")
+      Assert.equal 400 response.status
+    test "POST /users" do
+      response <- app
+        (request "POST" [ "users" ] [] """{"name":"jiro","age":10}""")
+      Assert.equal 201 response.status
+      assertJsonBody """{"name":"jiro","age":10}""" response
+    test "POST /users with broken JSON" do
+      response <- app (request "POST" [ "users" ] [] "{")
+      Assert.equal 400 response.status
+    test "POST /users with a body of the wrong type" do
+      response <- app (request "POST" [ "users" ] [] """{"name":1,"age":"x"}""")
+      Assert.equal 400 response.status
+    test "an unknown path" do
+      response <- app (request "GET" [ "posts" ] [] "")
+      Assert.equal 404 response.status
+    test "a method that no route has" do
+      response <- app (request "DELETE" [ "users", "1" ] [] "")
+      Assert.equal 404 response.status

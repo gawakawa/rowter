@@ -22,6 +22,7 @@
 
       ps = purs-nix.purs {
         dependencies = [
+          "aff"
           "argonaut-core"
           "arrays"
           "codec"
@@ -29,6 +30,7 @@
           "console"
           "effect"
           "either"
+          "foreign-object"
           "integers"
           "maybe"
           "numbers"
@@ -41,6 +43,7 @@
         ];
 
         test-dependencies = [
+          "aff"
           "quickcheck"
           "test-unit"
         ];
