@@ -2,19 +2,25 @@ module Rowter where
 
 import Prelude
 
-import Data.Codec (Codec', codec')
+import Data.Argonaut.Core (stringify)
+import Data.Codec (Codec', codec', encode)
 import Data.Codec.Argonaut as CA
 import Data.Either (Either(..), note)
 import Data.Int as Int
 import Data.Number as Number
 import Data.Number.Format as Number.Format
+import Data.Reflectable (class Reflectable, reflectType)
 import Data.String.Regex (Regex)
 import Data.String.Regex as Regex
 import Data.String.Regex.Flags (noFlags)
 import Data.String.Regex.Unsafe (unsafeRegex)
 import Data.Symbol (class IsSymbol)
+import Data.Tuple (Tuple(..))
+import Data.Variant (Variant)
+import Data.Variant as V
 import Prim.Row as Row
 import Prim.RowList (class RowToList, Cons, Nil, RowList)
+import Prim.TypeError (class Fail, Text)
 import Type.Proxy (Proxy(..))
 
 -- Codec
@@ -97,3 +103,53 @@ instance HasTextCodec Boolean where
         s -> Left ("Invalid boolean: " <> s)
     )
     show
+
+-- Response
+
+newtype WithStatus :: Int -> Type -> Type
+newtype WithStatus code a = WithStatus a
+
+type Response =
+  { status :: Int
+  , headers :: Array (Tuple String String)
+  , body :: String
+  }
+
+respond
+  :: forall @label code a r_ r
+   . IsSymbol label
+  => Row.Cons label (WithStatus code a) r_ r
+  => a
+  -> Variant r
+respond a = V.inj (Proxy :: Proxy label) (WithStatus a)
+
+class EncodeResponse (rl :: RowList Type) (r :: Row Type) | rl -> r where
+  encodeResponse :: Proxy rl -> Variant r -> Response
+
+instance EncodeResponse Nil () where
+  encodeResponse _ = V.case_
+
+instance
+  ( IsSymbol l
+  , Reflectable code Int
+  , HasJsonCodec a
+  , EncodeResponse tl r'
+  , Row.Cons l (WithStatus code a) r' r
+  ) =>
+  EncodeResponse (Cons l (WithStatus code a) tl) r where
+  encodeResponse _ = V.on (Proxy :: Proxy l)
+    ( \(WithStatus a) ->
+        { status: reflectType (Proxy :: Proxy code)
+        , headers: [ Tuple "Content-Type" "application/json" ]
+        , body: stringify (encode jsonCodec a)
+        }
+    )
+    (encodeResponse (Proxy :: Proxy tl))
+else instance
+  Fail (Text "A response must be written as WithStatus code body") =>
+  EncodeResponse (Cons l a tl) () where
+  encodeResponse _ = V.case_
+
+toResponse
+  :: forall r rl. RowToList r rl => EncodeResponse rl r => Variant r -> Response
+toResponse = encodeResponse (Proxy :: Proxy rl)

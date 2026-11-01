@@ -2,7 +2,8 @@ module Test.Main where
 
 import Prelude
 
-import Data.Argonaut.Core (Json, caseJson, fromArray, fromObject, fromString)
+import Data.Argonaut.Core (Json, caseJson, fromArray, fromObject, fromString, stringify)
+import Data.Argonaut.Parser (jsonParser)
 import Data.Array (replicate)
 import Data.Array.NonEmpty (cons')
 import Data.Codec (decode, encode)
@@ -14,9 +15,11 @@ import Data.String (Pattern(..), Replacement(..), replaceAll, stripPrefix)
 import Data.String.CodeUnits (fromCharArray)
 import Data.Traversable (traverse)
 import Data.Tuple (Tuple(..))
+import Data.Variant (Variant)
 import Effect (Effect)
+import Effect.Aff (Aff)
 import Foreign.Object as FO
-import Rowter (class HasJsonCodec, class HasTextCodec, jsonCodec, textCodec)
+import Rowter (class HasJsonCodec, class HasTextCodec, Response, WithStatus, jsonCodec, respond, textCodec, toResponse)
 import Test.QuickCheck (Result, arbitrary, (===))
 import Test.QuickCheck.Gen (Gen, arrayOf, chooseInt, elements)
 import Test.Unit (TestSuite, suite, test)
@@ -25,6 +28,27 @@ import Test.Unit.Main (runTest)
 import Test.Unit.QuickCheck (quickCheck)
 
 type User = { name :: String, age :: Int }
+type ErrorBody = { message :: String }
+
+type NotFoundErr r = (notFound :: WithStatus 404 ErrorBody | r)
+
+taro :: User
+taro = { name: "taro", age: 20 }
+
+-- Json has no Show instance; Eq compares objects regardless of key order
+newtype Structural = Structural Json
+
+derive newtype instance Eq Structural
+
+instance Show Structural where
+  show (Structural json) = stringify json
+
+parseStructural :: String -> Either String Structural
+parseStructural = map Structural <<< jsonParser
+
+assertJsonBody :: String -> Response -> Aff Unit
+assertJsonBody expected response =
+  Assert.equal (parseStructural expected) (parseStructural response.body)
 
 genUser :: Gen User
 genUser = do
@@ -183,3 +207,21 @@ main = runTest do
       test "json Int from a string" do
         Assert.equal true
           (isLeft (decodeJson (fromString "1") :: Either JsonDecodeError Int))
+  suite "response" do
+    let
+      ok = toResponse
+        ( respond @"ok" taro
+            :: Variant (ok :: WithStatus 200 User | NotFoundErr ())
+        )
+      notFound = toResponse
+        ( respond @"notFound" { message: "no user" }
+            :: Variant (ok :: WithStatus 200 User | NotFoundErr ())
+        )
+    test "status" do
+      Assert.equal 200 ok.status
+      Assert.equal 404 notFound.status
+    test "body" do
+      assertJsonBody """{"name":"taro","age":20}""" ok
+      assertJsonBody """{"message":"no user"}""" notFound
+    test "content type" do
+      Assert.equal [ Tuple "Content-Type" "application/json" ] ok.headers

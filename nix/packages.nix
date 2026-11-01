@@ -32,6 +32,8 @@
           "numbers"
           "prelude"
           "strings"
+          "tuples"
+          "variant"
         ];
 
         test-dependencies = [
