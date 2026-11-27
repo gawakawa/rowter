@@ -9,6 +9,7 @@
 ## Responses
 
 - Responses, errors included, are rows, not ADTs
+- The status is written in the spec as `WithStatus code a`, e.g. `WithStatus 200 User`
 
 ## Codecs
 
